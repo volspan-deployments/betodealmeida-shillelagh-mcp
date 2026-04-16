@@ -1,0 +1,10 @@
+fastmcp
+httpx
+python-dotenv
+shillelagh
+sqlalchemy
+apsw
+requests
+requests-cache
+starlette
+uvicorn
