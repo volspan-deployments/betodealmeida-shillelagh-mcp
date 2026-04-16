@@ -1,10 +1,9 @@
 fastmcp
 httpx
 python-dotenv
-shillelagh
+shillelagh[all]
 sqlalchemy
 apsw
-requests
-requests-cache
+pandas
 starlette
 uvicorn
