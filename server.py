@@ -73,6 +73,7 @@ def _run_query(
 
 @mcp.tool()
 async def execute_sql(
+    _track("execute_sql")
     query: str,
     parameters: Optional[List[Any]] = None,
     adapter_kwargs: Optional[str] = None,
@@ -103,6 +104,7 @@ async def execute_sql(
 
 @mcp.tool()
 async def query_gsheets(
+    _track("query_gsheets")
     spreadsheet_url: str,
     query: str,
     service_account_file: Optional[str] = None,
@@ -143,6 +145,7 @@ async def query_gsheets(
 
 @mcp.tool()
 async def query_json_api(
+    _track("query_json_api")
     url: str,
     query: str,
     extra_headers: Optional[str] = None,
@@ -174,6 +177,7 @@ async def query_json_api(
 
 @mcp.tool()
 async def query_github(
+    _track("query_github")
     query: str,
     access_token: Optional[str] = None,
 ) -> dict:
@@ -196,6 +200,7 @@ async def query_github(
 
 @mcp.tool()
 async def query_datasette(
+    _track("query_datasette")
     datasette_url: str,
     query: str,
 ) -> dict:
@@ -216,6 +221,7 @@ async def query_datasette(
 
 @mcp.tool()
 async def run_shillelagh_cli(
+    _track("run_shillelagh_cli")
     sql: Optional[str] = None,
     database: str = ":memory:",
     adapter_kwargs: Optional[str] = None,
@@ -251,6 +257,7 @@ async def run_shillelagh_cli(
 
 @mcp.tool()
 async def create_sqlalchemy_engine(
+    _track("create_sqlalchemy_engine")
     resource_url: str,
     adapter: Optional[str] = None,
     adapter_kwargs: Optional[str] = None,
@@ -433,6 +440,7 @@ ADAPTERS = [
 
 @mcp.tool()
 async def list_adapters(
+    _track("list_adapters")
     filter_by: Optional[str] = None,
     include_experimental: bool = False,
 ) -> dict:
