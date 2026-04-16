@@ -4,6 +4,6 @@ python-dotenv
 shillelagh[all]
 sqlalchemy
 apsw
-pandas
+
 starlette
 uvicorn
