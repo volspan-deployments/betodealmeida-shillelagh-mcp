@@ -12,503 +12,466 @@ from typing import Optional, List, Any
 
 mcp = FastMCP("shillelagh")
 
+# ---------------------------------------------------------------------------
+# Helper: run a query via the shillelagh DB-API 2.0 interface
+# ---------------------------------------------------------------------------
 
-def _get_shillelagh_connection(adapter_kwargs: Optional[str] = None):
-    """Create a shillelagh DB API 2.0 connection."""
-    from shillelagh.backends.apsw.db import connect
-
-    kwargs = {}
-    if adapter_kwargs:
-        try:
-            kwargs = json.loads(adapter_kwargs)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid adapter_kwargs JSON: {e}")
-
-    return connect(":memory:", adapter_kwargs=kwargs)
-
-
-def _rows_to_serializable(cursor, rows):
-    """Convert rows and cursor description to a serializable dict."""
-    if cursor.description is None:
-        return {"columns": [], "rows": [], "rowcount": cursor.rowcount}
-
-    columns = [desc[0] for desc in cursor.description]
-    result_rows = []
-    for row in rows:
-        serialized_row = {}
-        for col, val in zip(columns, row):
-            if hasattr(val, 'isoformat'):
-                serialized_row[col] = val.isoformat()
-            elif isinstance(val, (int, float, str, bool, type(None))):
-                serialized_row[col] = val
-            else:
-                serialized_row[col] = str(val)
-        result_rows.append(serialized_row)
-
-    return {
-        "columns": columns,
-        "rows": result_rows,
-        "rowcount": len(result_rows)
-    }
-
-
-@mcp.tool()
-def execute_sql(
+def _run_query(
     query: str,
     parameters: Optional[List[Any]] = None,
-    adapter_kwargs: Optional[str] = None
+    adapter_kwargs: Optional[dict] = None,
 ) -> dict:
-    """
-    Execute a SQL query against any supported resource (Google Sheets, GitHub, APIs, files,
-    databases, JSON/XML URLs, etc.) using Shillelagh's DB API 2.0 interface.
-    Table names are typically URLs or resource identifiers wrapped in quotes.
-    """
-    try:
-        connection = _get_shillelagh_connection(adapter_kwargs)
-        cursor = connection.cursor()
-
-        if parameters:
-            rows = list(cursor.execute(query, parameters))
-        else:
-            rows = list(cursor.execute(query))
-
-        result = _rows_to_serializable(cursor, rows)
-        connection.close()
-        return {"success": True, "data": result}
-    except Exception as e:
-        return {"success": False, "error": str(e), "error_type": type(e).__name__}
-
-
-@mcp.tool()
-def query_google_sheet(
-    spreadsheet_url: str,
-    query: str,
-    service_account_file: Optional[str] = None,
-    subject: Optional[str] = None
-) -> dict:
-    """
-    Query or manipulate a Google Sheets spreadsheet using SQL.
-    Supports SELECT, INSERT, UPDATE, DELETE.
-    """
+    """Execute a SQL query using shillelagh and return serialisable results."""
     try:
         from shillelagh.backends.apsw.db import connect
+    except ImportError as exc:
+        return {"error": f"shillelagh is not installed: {exc}"}
 
-        gsheets_kwargs = {}
-        if service_account_file:
-            gsheets_kwargs["service_account_file"] = service_account_file
-        if subject:
-            gsheets_kwargs["subject"] = subject
-
-        adapter_kwargs_dict = {}
-        if gsheets_kwargs:
-            adapter_kwargs_dict["gsheets"] = gsheets_kwargs
-
-        connection = connect(":memory:", adapter_kwargs=adapter_kwargs_dict)
-        cursor = connection.cursor()
-        rows = list(cursor.execute(query))
-        result = _rows_to_serializable(cursor, rows)
-        connection.close()
-        return {"success": True, "spreadsheet_url": spreadsheet_url, "data": result}
-    except Exception as e:
-        return {"success": False, "error": str(e), "error_type": type(e).__name__}
-
-
-@mcp.tool()
-def query_api_url(
-    url: str,
-    query_filter: Optional[str] = None,
-    columns: Optional[List[str]] = None,
-    extra_params: Optional[str] = None
-) -> dict:
-    """
-    Query a remote JSON or XML API endpoint as if it were a SQL table.
-    Shillelagh auto-detects the format and exposes fields as columns.
-    """
     try:
-        from shillelagh.backends.apsw.db import connect
-
-        # Build the URL with extra params if provided
-        target_url = url
-        if extra_params:
-            try:
-                params = json.loads(extra_params)
-                if params:
-                    separator = "&" if "?" in url else "?"
-                    param_str = "&".join(f"{k}={v}" for k, v in params.items())
-                    target_url = f"{url}{separator}{param_str}"
-            except json.JSONDecodeError as e:
-                return {"success": False, "error": f"Invalid extra_params JSON: {e}"}
-
-        # Build SELECT clause
-        if columns:
-            select_clause = ", ".join(columns)
-        else:
-            select_clause = "*"
-
-        # Build WHERE clause
-        where_clause = f" WHERE {query_filter}" if query_filter else ""
-
-        sql = f'SELECT {select_clause} FROM "{target_url}"{where_clause}'
-
-        connection = connect(":memory:")
-        cursor = connection.cursor()
-        rows = list(cursor.execute(sql))
-        result = _rows_to_serializable(cursor, rows)
-        connection.close()
-        return {"success": True, "url": target_url, "query": sql, "data": result}
-    except Exception as e:
-        return {"success": False, "error": str(e), "error_type": type(e).__name__}
-
-
-@mcp.tool()
-def query_github(
-    query: str,
-    access_token: Optional[str] = None
-) -> dict:
-    """
-    Query GitHub resources (issues, pull requests, repositories, etc.) using SQL
-    via the Shillelagh GitHub adapter.
-    """
-    try:
-        from shillelagh.backends.apsw.db import connect
-
-        adapter_kwargs_dict = {}
-        if access_token:
-            adapter_kwargs_dict["github"] = {"access_token": access_token}
-
-        connection = connect(":memory:", adapter_kwargs=adapter_kwargs_dict)
-        cursor = connection.cursor()
-        rows = list(cursor.execute(query))
-        result = _rows_to_serializable(cursor, rows)
-        connection.close()
-        return {"success": True, "data": result}
-    except Exception as e:
-        return {"success": False, "error": str(e), "error_type": type(e).__name__}
-
-
-@mcp.tool()
-def query_datasette(
-    datasette_url: str,
-    query: str
-) -> dict:
-    """
-    Query a Datasette instance using SQL via Shillelagh.
-    Access published datasets hosted on any Datasette server as SQL tables.
-    """
-    try:
-        from shillelagh.backends.apsw.db import connect
-
-        connection = connect(":memory:")
-        cursor = connection.cursor()
-        rows = list(cursor.execute(query))
-        result = _rows_to_serializable(cursor, rows)
-        connection.close()
-        return {"success": True, "datasette_url": datasette_url, "data": result}
-    except Exception as e:
-        return {"success": False, "error": str(e), "error_type": type(e).__name__}
-
-
-@mcp.tool()
-def run_cli_query(
-    query: str,
-    output_format: str = "table",
-    config_file: Optional[str] = None
-) -> dict:
-    """
-    Run a SQL query using the Shillelagh command-line interface.
-    Supports output formats: 'table', 'csv', 'json'.
-    """
-    try:
-        # Try using shillelagh programmatically to simulate CLI behavior
-        from shillelagh.backends.apsw.db import connect
-        import io
-        import csv as csv_module
-
-        connection = connect(":memory:")
-        cursor = connection.cursor()
-        rows = list(cursor.execute(query))
-
-        if cursor.description is None:
-            connection.close()
-            return {
-                "success": True,
-                "output": f"Query executed. Rows affected: {cursor.rowcount}",
-                "format": output_format
-            }
-
-        columns = [desc[0] for desc in cursor.description]
-
-        if output_format == "json":
-            result_rows = []
-            for row in rows:
-                serialized_row = {}
-                for col, val in zip(columns, row):
-                    if hasattr(val, 'isoformat'):
-                        serialized_row[col] = val.isoformat()
-                    else:
-                        serialized_row[col] = val
-                result_rows.append(serialized_row)
-            output = json.dumps(result_rows, indent=2, default=str)
-
-        elif output_format == "csv":
-            buf = io.StringIO()
-            writer = csv_module.writer(buf)
-            writer.writerow(columns)
-            for row in rows:
-                serialized = []
-                for val in row:
-                    if hasattr(val, 'isoformat'):
-                        serialized.append(val.isoformat())
-                    else:
-                        serialized.append(val)
-                writer.writerow(serialized)
-            output = buf.getvalue()
-
-        else:  # table format
-            col_widths = [len(c) for c in columns]
-            str_rows = []
-            for row in rows:
-                str_row = []
-                for val in row:
-                    if hasattr(val, 'isoformat'):
-                        s = val.isoformat()
-                    else:
-                        s = str(val) if val is not None else "NULL"
-                    str_row.append(s)
-                str_rows.append(str_row)
-                for i, s in enumerate(str_row):
-                    col_widths[i] = max(col_widths[i], len(s))
-
-            separator = "+" + "+".join("-" * (w + 2) for w in col_widths) + "+"
-            header = "|" + "|".join(f" {c:<{col_widths[i]}} " for i, c in enumerate(columns)) + "|"
-            lines = [separator, header, separator]
-            for str_row in str_rows:
-                line = "|" + "|".join(f" {v:<{col_widths[i]}} " for i, v in enumerate(str_row)) + "|"
-                lines.append(line)
-            lines.append(separator)
-            output = "\n".join(lines)
-
-        connection.close()
-        return {"success": True, "output": output, "format": output_format, "row_count": len(rows)}
-    except Exception as e:
-        return {"success": False, "error": str(e), "error_type": type(e).__name__}
-
-
-@mcp.tool()
-def list_adapter_capabilities(
-    resource_url: Optional[str] = None,
-    adapter_kwargs: Optional[str] = None
-) -> dict:
-    """
-    Introspect and list available Shillelagh adapters, their supported URL patterns,
-    and columns/fields they expose for a given resource URL.
-    """
-    try:
-        import importlib
-        import pkgutil
-        import shillelagh.adapters.api as api_adapters
-        import shillelagh.adapters.file as file_adapters
-
-        adapter_info = []
-
-        # List all known adapter modules
-        adapter_packages = []
-        try:
-            adapter_packages += [
-                name for _, name, _ in pkgutil.iter_modules(api_adapters.__path__)
-            ]
-        except Exception:
-            pass
-        try:
-            adapter_packages += [
-                name for _, name, _ in pkgutil.iter_modules(file_adapters.__path__)
-            ]
-        except Exception:
-            pass
-
-        if not resource_url:
-            # Just list what we know about
-            known_adapters = [
-                {
-                    "name": "gsheets",
-                    "description": "Google Sheets adapter",
-                    "url_pattern": "https://docs.google.com/spreadsheets/d/...",
-                    "supports": ["SELECT", "INSERT", "UPDATE", "DELETE"]
-                },
-                {
-                    "name": "github",
-                    "description": "GitHub API adapter (issues, PRs, repos)",
-                    "url_pattern": "https://api.github.com/repos/{owner}/{repo}/issues",
-                    "supports": ["SELECT"]
-                },
-                {
-                    "name": "datasette",
-                    "description": "Datasette instance adapter",
-                    "url_pattern": "https://{datasette-host}/{database}/{table}",
-                    "supports": ["SELECT"]
-                },
-                {
-                    "name": "weatherapi",
-                    "description": "WeatherAPI.com historical weather data",
-                    "url_pattern": "https://api.weatherapi.com/v1/history.json?key={API_KEY}&q={location}",
-                    "supports": ["SELECT"]
-                },
-                {
-                    "name": "s3select",
-                    "description": "AWS S3 Select for querying S3 objects",
-                    "url_pattern": "s3://{bucket}/{key}",
-                    "supports": ["SELECT"]
-                },
-                {
-                    "name": "dbt_metricflow",
-                    "description": "dbt Metric Flow metrics adapter",
-                    "url_pattern": "https://semantic-layer.cloud.getdbt.com/",
-                    "supports": ["SELECT"]
-                },
-                {
-                    "name": "csv",
-                    "description": "CSV file adapter",
-                    "url_pattern": "file:///path/to/file.csv or http(s)://...",
-                    "supports": ["SELECT", "INSERT", "DELETE"]
-                }
-            ]
-            return {
-                "success": True,
-                "adapters": known_adapters,
-                "note": "Pass a resource_url to inspect a specific resource's columns."
-            }
-
-        # Inspect a specific resource URL
-        from shillelagh.backends.apsw.db import connect
-
-        kwargs = {}
-        if adapter_kwargs:
-            try:
-                kwargs = json.loads(adapter_kwargs)
-            except json.JSONDecodeError as e:
-                return {"success": False, "error": f"Invalid adapter_kwargs JSON: {e}"}
-
+        kwargs = adapter_kwargs or {}
         connection = connect(":memory:", adapter_kwargs=kwargs)
         cursor = connection.cursor()
 
-        # Use PRAGMA to get table info
-        try:
-            pragma_query = f'PRAGMA table_info("{resource_url}")'
-            rows = list(cursor.execute(pragma_query))
-            columns = []
-            for row in rows:
-                columns.append({
-                    "cid": row[0],
-                    "name": row[1],
-                    "type": row[2],
-                    "notnull": bool(row[3]),
-                    "default_value": row[4],
-                    "primary_key": bool(row[5])
-                })
-            connection.close()
-            return {
-                "success": True,
-                "resource_url": resource_url,
-                "columns": columns,
-                "column_count": len(columns)
-            }
-        except Exception as pragma_err:
-            # Fall back to SELECT * LIMIT 0 to get schema
-            try:
-                schema_query = f'SELECT * FROM "{resource_url}" LIMIT 1'
-                rows = list(cursor.execute(schema_query))
-                cols = []
-                if cursor.description:
-                    cols = [{"name": desc[0], "type": str(desc[1])} for desc in cursor.description]
-                connection.close()
-                return {
-                    "success": True,
-                    "resource_url": resource_url,
-                    "columns": cols,
-                    "column_count": len(cols),
-                    "sample_rows": _rows_to_serializable(cursor, rows)["rows"]
-                }
-            except Exception as e:
-                connection.close()
-                return {
-                    "success": False,
-                    "error": str(e),
-                    "pragma_error": str(pragma_err),
-                    "error_type": type(e).__name__
-                }
+        params = tuple(parameters) if parameters else ()
+        cursor.execute(query, params)
 
-    except Exception as e:
-        return {"success": False, "error": str(e), "error_type": type(e).__name__}
+        # description is None for non-SELECT statements
+        if cursor.description:
+            columns = [desc[0] for desc in cursor.description]
+            rows = cursor.fetchall()
+            # Coerce every value to a JSON-serialisable type
+            serialised_rows = []
+            for row in rows:
+                serialised_row = {}
+                for col, val in zip(columns, row):
+                    if hasattr(val, "isoformat"):
+                        serialised_row[col] = val.isoformat()
+                    else:
+                        try:
+                            json.dumps(val)  # test serializability
+                            serialised_row[col] = val
+                        except (TypeError, ValueError):
+                            serialised_row[col] = str(val)
+                serialised_rows.append(serialised_row)
+            return {"columns": columns, "rows": serialised_rows, "rowcount": len(serialised_rows)}
+        else:
+            rowcount = cursor.rowcount if cursor.rowcount is not None else -1
+            return {"message": "Query executed successfully.", "rowcount": rowcount}
+
+    except Exception as exc:  # pylint: disable=broad-except
+        return {"error": str(exc)}
+    finally:
+        try:
+            connection.close()
+        except Exception:  # pylint: disable=broad-except
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Tool: execute_sql
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def execute_sql(
+    query: str,
+    parameters: Optional[List[Any]] = None,
+    adapter_kwargs: Optional[str] = None,
+) -> dict:
+    """
+    Execute a SQL query against any resource supported by Shillelagh
+    (Google Sheets, APIs, JSON/XML endpoints, GitHub, Datasette, dbt MetricFlow, etc.).
+
+    The 'table' in the SQL is typically a URL or resource identifier enclosed in
+    double quotes, e.g.
+        SELECT * FROM "https://docs.google.com/spreadsheets/d/..."
+
+    Supports SELECT, INSERT, UPDATE, DELETE.
+    """
+    kwargs: Optional[dict] = None
+    if adapter_kwargs:
+        try:
+            kwargs = json.loads(adapter_kwargs)
+        except json.JSONDecodeError as exc:
+            return {"error": f"Invalid adapter_kwargs JSON: {exc}"}
+
+    return _run_query(query, parameters=parameters, adapter_kwargs=kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Tool: query_gsheets
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def query_gsheets(
+    spreadsheet_url: str,
+    query: str,
+    service_account_file: Optional[str] = None,
+    subject: Optional[str] = None,
+) -> dict:
+    """
+    Query or modify a Google Sheets spreadsheet using SQL.
+
+    The placeholder {url} inside the query string will be replaced with the
+    spreadsheet_url automatically.
+
+    Authentication can be provided via a service account JSON file or default
+    application credentials.
+    """
+    # Replace placeholder if present
+    resolved_query = query.replace("{url}", spreadsheet_url)
+
+    # If the query does not reference the URL at all, auto-inject it as the table
+    if spreadsheet_url not in resolved_query and "{url}" not in query:
+        # Try to auto-wrap: replace bare table placeholder
+        resolved_query = query  # leave as-is; user should provide correct SQL
+
+    adapter_kwargs: dict = {}
+    gsheets_opts: dict = {}
+    if service_account_file:
+        gsheets_opts["service_account_file"] = service_account_file
+    if subject:
+        gsheets_opts["subject"] = subject
+    if gsheets_opts:
+        adapter_kwargs["gsheetsapi"] = gsheets_opts
+
+    return _run_query(resolved_query, adapter_kwargs=adapter_kwargs or None)
+
+
+# ---------------------------------------------------------------------------
+# Tool: query_json_api
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def query_json_api(
+    url: str,
+    query: str,
+    extra_headers: Optional[str] = None,
+) -> dict:
+    """
+    Query any JSON or XML HTTP API endpoint using SQL.
+
+    The URL should be used as the table name inside double quotes in the SQL query.
+    """
+    adapter_kwargs: dict = {}
+    if extra_headers:
+        try:
+            headers = json.loads(extra_headers)
+        except json.JSONDecodeError as exc:
+            return {"error": f"Invalid extra_headers JSON: {exc}"}
+        # Pass headers to both generic JSON and XML adapters
+        adapter_kwargs["genericjsonapi"] = {"extra_headers": headers}
+        adapter_kwargs["genericxmlapi"] = {"extra_headers": headers}
+
+    # Replace {url} placeholder if used
+    resolved_query = query.replace("{url}", url)
+
+    return _run_query(resolved_query, adapter_kwargs=adapter_kwargs or None)
+
+
+# ---------------------------------------------------------------------------
+# Tool: query_github
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def query_github(
+    query: str,
+    access_token: Optional[str] = None,
+) -> dict:
+    """
+    Query GitHub resources (issues, pull requests, releases, etc.) using SQL.
+
+    The table name in the SQL should be a GitHub API URL, e.g.
+        SELECT * FROM "https://api.github.com/repos/owner/repo/issues"
+    """
+    adapter_kwargs: dict = {}
+    if access_token:
+        adapter_kwargs["githubapi"] = {"access_token": access_token}
+
+    return _run_query(query, adapter_kwargs=adapter_kwargs or None)
+
+
+# ---------------------------------------------------------------------------
+# Tool: query_datasette
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def query_datasette(
+    datasette_url: str,
+    query: str,
+) -> dict:
+    """
+    Query a Datasette instance using SQL.
+
+    Datasette exposes SQLite databases as web APIs; Shillelagh treats them as
+    SQL tables. The datasette_url should appear as the table name (in double
+    quotes) inside the SQL query.
+    """
+    resolved_query = query.replace("{url}", datasette_url)
+    return _run_query(resolved_query)
+
+
+# ---------------------------------------------------------------------------
+# Tool: run_shillelagh_cli
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def run_shillelagh_cli(
+    sql: Optional[str] = None,
+    database: str = ":memory:",
+    adapter_kwargs: Optional[str] = None,
+) -> dict:
+    """
+    Run a single SQL statement using the Shillelagh DB-API (simulating the CLI).
+
+    If 'sql' is provided the statement is executed and the results returned.
+    If omitted, a message is returned explaining that interactive REPL mode is
+    not available in this server context.
+    """
+    if not sql:
+        return {
+            "message": (
+                "Interactive REPL mode is not available inside the MCP server. "
+                "Please provide a 'sql' parameter with the statement to execute."
+            )
+        }
+
+    kwargs: Optional[dict] = None
+    if adapter_kwargs:
+        try:
+            kwargs = json.loads(adapter_kwargs)
+        except json.JSONDecodeError as exc:
+            return {"error": f"Invalid adapter_kwargs JSON: {exc}"}
+
+    return _run_query(sql, adapter_kwargs=kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Tool: create_sqlalchemy_engine
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def create_sqlalchemy_engine(
+    resource_url: str,
+    adapter: Optional[str] = None,
+    adapter_kwargs: Optional[str] = None,
+    sample_query: Optional[str] = None,
+) -> dict:
+    """
+    Generate a SQLAlchemy engine connection string and sample Python code
+    for connecting to Shillelagh resources.
+    """
+    parsed_kwargs: dict = {}
+    if adapter_kwargs:
+        try:
+            parsed_kwargs = json.loads(adapter_kwargs)
+        except json.JSONDecodeError as exc:
+            return {"error": f"Invalid adapter_kwargs JSON: {exc}"}
+
+    # Build connection string
+    connection_string = "shillelagh://"
+
+    # Build connect_args / adapter_kwargs block
+    connect_args_repr = ""
+    if parsed_kwargs:
+        inner = json.dumps(parsed_kwargs, indent=8)
+        connect_args_repr = f",\n    connect_args={{\n        'adapter_kwargs': {inner}\n    }}"
+    elif adapter:
+        connect_args_repr = (
+            f",\n    connect_args={{\n        'adapter_kwargs': {{\'{ adapter }\': {{}}}}\n    }}"
+        )
+
+    effective_query = sample_query or f'SELECT * FROM \"{resource_url}\"'
+
+    code = f"""from sqlalchemy import create_engine, text
+
+engine = create_engine(
+    \"{connection_string}\"{connect_args_repr}
+)
+
+with engine.connect() as conn:
+    result = conn.execute(text(\'{effective_query}\'))
+    for row in result:
+        print(row)
+"""
+
+    # Also show the DB-API 2.0 approach
+    dbapi_code = f"""from shillelagh.backends.apsw.db import connect
+
+connection = connect(":memory:"{', adapter_kwargs=' + json.dumps(parsed_kwargs) if parsed_kwargs else ''})
+cursor = connection.cursor()
+
+for row in cursor.execute(\'{effective_query}\'):
+    print(row)
+"""
+
+    return {
+        "connection_string": connection_string,
+        "sqlalchemy_sample_code": code,
+        "dbapi_sample_code": dbapi_code,
+        "resource_url": resource_url,
+        "adapter": adapter,
+        "adapter_kwargs": parsed_kwargs,
+        "sample_query": effective_query,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Tool: list_adapters
+# ---------------------------------------------------------------------------
+
+ADAPTERS = [
+    {
+        "name": "gsheetsapi",
+        "description": "Google Sheets adapter. Read and write Google Sheets spreadsheets via SQL.",
+        "url_pattern": "https://docs.google.com/spreadsheets/d/<SHEET_ID>/...",
+        "capabilities": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "auth": "service_account_file (JSON) or OAuth / Application Default Credentials",
+        "required_config": ["service_account_file OR default application credentials"],
+        "experimental": False,
+    },
+    {
+        "name": "genericjsonapi",
+        "description": "Generic JSON API adapter. Treat any JSON HTTP endpoint as a SQL table.",
+        "url_pattern": "https://<any-host>/path/to/data.json",
+        "capabilities": ["SELECT"],
+        "auth": "Optional extra_headers (e.g. Bearer tokens)",
+        "required_config": [],
+        "experimental": False,
+    },
+    {
+        "name": "genericxmlapi",
+        "description": "Generic XML API adapter. Treat any XML HTTP endpoint as a SQL table.",
+        "url_pattern": "https://<any-host>/path/to/data.xml",
+        "capabilities": ["SELECT"],
+        "auth": "Optional extra_headers",
+        "required_config": [],
+        "experimental": False,
+    },
+    {
+        "name": "githubapi",
+        "description": "GitHub adapter. Query GitHub issues, PRs, releases, and other resources.",
+        "url_pattern": "https://api.github.com/repos/<owner>/<repo>/<resource>",
+        "capabilities": ["SELECT"],
+        "auth": "access_token (personal access token, recommended to avoid rate limits)",
+        "required_config": [],
+        "experimental": False,
+    },
+    {
+        "name": "datasette",
+        "description": "Datasette adapter. Query Datasette-hosted SQLite databases via HTTP.",
+        "url_pattern": "https://<datasette-host>/<database>/<table>",
+        "capabilities": ["SELECT"],
+        "auth": "None required for public instances",
+        "required_config": [],
+        "experimental": False,
+    },
+    {
+        "name": "dbtmetricflow",
+        "description": "dbt MetricFlow adapter. Query dbt Semantic Layer metrics via SQL.",
+        "url_pattern": "https://semantic-layer.cloud.getdbt.com/ or custom *.dbt.com URLs",
+        "capabilities": ["SELECT"],
+        "auth": "service_token (dbt Cloud service token)",
+        "required_config": ["service_token", "environment_id"],
+        "experimental": False,
+    },
+    {
+        "name": "weatherapi",
+        "description": "WeatherAPI adapter. Query historical weather data using SQL.",
+        "url_pattern": "https://api.weatherapi.com/v1/history.json?key=<API_KEY>&q=<LOCATION>",
+        "capabilities": ["SELECT"],
+        "auth": "API key embedded in the URL",
+        "required_config": ["API key"],
+        "experimental": False,
+    },
+    {
+        "name": "csvfile",
+        "description": "CSV file adapter. Query local CSV files as SQL tables.",
+        "url_pattern": "/path/to/file.csv or file:///path/to/file.csv",
+        "capabilities": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        "auth": "None",
+        "required_config": [],
+        "experimental": False,
+    },
+    {
+        "name": "system",
+        "description": "System adapter. Expose system information (e.g. adapters list) as SQL tables.",
+        "url_pattern": "system://<resource>",
+        "capabilities": ["SELECT"],
+        "auth": "None",
+        "required_config": [],
+        "experimental": False,
+    },
+    {
+        "name": "s3selectapi",
+        "description": "Amazon S3 Select adapter. Query S3 objects (CSV, JSON, Parquet) using SQL.",
+        "url_pattern": "s3://<bucket>/<key>",
+        "capabilities": ["SELECT"],
+        "auth": "AWS credentials (environment variables or IAM role)",
+        "required_config": ["AWS credentials"],
+        "experimental": True,
+    },
+    {
+        "name": "socrata",
+        "description": "Socrata Open Data API adapter. Query government open data portals.",
+        "url_pattern": "https://<socrata-domain>/resource/<dataset-id>.json",
+        "capabilities": ["SELECT"],
+        "auth": "Optional app token",
+        "required_config": [],
+        "experimental": True,
+    },
+    {
+        "name": "gsheetschart",
+        "description": "Google Sheets Chart adapter. Query data backing charts in Google Sheets.",
+        "url_pattern": "https://docs.google.com/spreadsheets/d/<SHEET_ID>/...",
+        "capabilities": ["SELECT"],
+        "auth": "Same as gsheetsapi",
+        "required_config": [],
+        "experimental": True,
+    },
+]
 
 
 @mcp.tool()
-def create_sqlalchemy_engine(
-    query: str,
-    connection_string: str = "shillelagh://",
-    adapter_kwargs: Optional[str] = None
+async def list_adapters(
+    filter_by: Optional[str] = None,
+    include_experimental: bool = False,
 ) -> dict:
     """
-    Create and test a SQLAlchemy engine using the Shillelagh dialect,
-    then execute a SQL query through it. Useful for integrating with
-    Pandas, Superset, or ORM frameworks.
+    List all available Shillelagh adapters with their supported URL patterns,
+    capabilities, and required configuration.
+
+    Optionally filter by a keyword (e.g. 'google', 'json', 'github') or a
+    specific adapter name (e.g. 'gsheetsapi').
     """
-    try:
-        from sqlalchemy import text
-        from sqlalchemy.engine import create_engine
+    results = ADAPTERS
 
-        connect_args = {}
-        if adapter_kwargs:
-            try:
-                parsed_kwargs = json.loads(adapter_kwargs)
-                connect_args["adapter_kwargs"] = parsed_kwargs
-            except json.JSONDecodeError as e:
-                return {"success": False, "error": f"Invalid adapter_kwargs JSON: {e}"}
+    if not include_experimental:
+        results = [a for a in results if not a.get("experimental", False)]
 
-        if connect_args:
-            engine = create_engine(connection_string, connect_args=connect_args)
-        else:
-            engine = create_engine(connection_string)
+    if filter_by:
+        f = filter_by.lower()
+        results = [
+            a
+            for a in results
+            if (
+                f in a["name"].lower()
+                or f in a["description"].lower()
+                or f in a["url_pattern"].lower()
+                or any(f in c.lower() for c in a["capabilities"])
+            )
+        ]
 
-        with engine.connect() as conn:
-            result = conn.execute(text(query))
+    return {
+        "total": len(results),
+        "filter_by": filter_by,
+        "include_experimental": include_experimental,
+        "adapters": results,
+    }
 
-            if result.returns_rows:
-                columns = list(result.keys())
-                rows = result.fetchall()
-                result_rows = []
-                for row in rows:
-                    serialized_row = {}
-                    for col, val in zip(columns, row):
-                        if hasattr(val, 'isoformat'):
-                            serialized_row[col] = val.isoformat()
-                        elif isinstance(val, (int, float, str, bool, type(None))):
-                            serialized_row[col] = val
-                        else:
-                            serialized_row[col] = str(val)
-                    result_rows.append(serialized_row)
 
-                return {
-                    "success": True,
-                    "connection_string": connection_string,
-                    "data": {
-                        "columns": columns,
-                        "rows": result_rows,
-                        "rowcount": len(result_rows)
-                    }
-                }
-            else:
-                return {
-                    "success": True,
-                    "connection_string": connection_string,
-                    "data": {
-                        "columns": [],
-                        "rows": [],
-                        "rowcount": result.rowcount
-                    }
-                }
-    except Exception as e:
-        return {"success": False, "error": str(e), "error_type": type(e).__name__}
-
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 
 
